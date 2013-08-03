@@ -704,6 +704,11 @@ Y(ret)
 X(msr_imm)
 {
 	uint32_t mask = ic->arg[1];
+
+	if ((cpu->cd.arm.cpsr & ARM_FLAG_MODE) == ARM_MODE_USR32) {
+		mask &= 0xff000000;
+	}
+
 	int switch_register_banks = (mask & ARM_FLAG_MODE) &&
 	    ((cpu->cd.arm.cpsr & ARM_FLAG_MODE) !=
 	    (ic->arg[0] & ARM_FLAG_MODE));
@@ -757,15 +762,15 @@ X(msr_imm_spsr)
 		break;
 	default:fatal("msr_spsr: unimplemented mode %i\n",
 		    cpu->cd.arm.cpsr & ARM_FLAG_MODE);
-{
-	/*  Synchronize the program counter:  */
-	uint32_t old_pc, low_pc = ((size_t)ic - (size_t)
-	    cpu->cd.arm.cur_ic_page) / sizeof(struct arm_instr_call);
-	cpu->pc &= ~((ARM_IC_ENTRIES_PER_PAGE-1) << ARM_INSTR_ALIGNMENT_SHIFT);
-	cpu->pc += (low_pc << ARM_INSTR_ALIGNMENT_SHIFT);
-	old_pc = cpu->pc;
-	printf("msr_spsr: old pc = 0x%08"PRIx32"\n", old_pc);
-}
+		{
+			/*  Synchronize the program counter:  */
+			uint32_t old_pc, low_pc = ((size_t)ic - (size_t)
+			    cpu->cd.arm.cur_ic_page) / sizeof(struct arm_instr_call);
+			cpu->pc &= ~((ARM_IC_ENTRIES_PER_PAGE-1) << ARM_INSTR_ALIGNMENT_SHIFT);
+			cpu->pc += (low_pc << ARM_INSTR_ALIGNMENT_SHIFT);
+			old_pc = cpu->pc;
+			printf("msr_spsr: old pc = 0x%08"PRIx32"\n", old_pc);
+		}
 		exit(1);
 	}
 }
@@ -2501,7 +2506,7 @@ X(to_be_translated)
 	unsigned char *page;
 	unsigned char ib[4];
 	int condition_code, main_opcode, secondary_opcode, s_bit, rn, rd, r8;
-	int p_bit, u_bit, w_bit, l_bit, regform, rm, c, t, any_pc_reg;
+	int p_bit, u_bit, w_bit, l_bit, regform, rm, any_pc_reg; // , c, t
 	void (*samepage_function)(struct cpu *, struct arm_instr_call *);
 
 	/*  Figure out the address of the instruction:  */
@@ -2551,8 +2556,8 @@ X(to_be_translated)
 	rn    = (iword >> 16) & 15;
 	rd    = (iword >> 12) & 15;
 	r8    = (iword >> 8) & 15;
-	c     = (iword >> 7) & 31;
-	t     = (iword >> 4) & 7;
+	// c     = (iword >> 7) & 31;
+	// t     = (iword >> 4) & 7;
 	rm    = iword & 15;
 
 	if (condition_code == 0xf) {
@@ -2703,13 +2708,18 @@ X(to_be_translated)
 				imm = (imm >> 2) | ((imm & 3) << 30);
 			ic->arg[0] = imm;
 			ic->arg[2] = (size_t)(&cpu->cd.arm.r[rm]);
-			switch ((iword >> 16) & 15) {
-			case 1:	ic->arg[1] = 0x000000ff; break;
-			case 8:	ic->arg[1] = 0xff000000; break;
-			case 9:	ic->arg[1] = 0xff0000ff; break;
-			default:if (!cpu->translation_readahead)
-					fatal("unimpl a: msr regform\n");
-				goto bad;
+			{
+				uint32_t arg1 = 0;
+				if (iword & (1<<16)) arg1 |= 0x000000ff;
+				if (iword & (1<<17)) arg1 |= 0x0000ff00;
+				if (iword & (1<<18)) arg1 |= 0x00ff0000;
+				if (iword & (1<<19)) arg1 |= 0xff000000;
+				if (arg1 == 0) {
+					if (!cpu->translation_readahead)
+						fatal("msr no fields\n");
+					goto bad;
+				}
+				ic->arg[1] = arg1;
 			}
 			break;
 		}
@@ -2728,8 +2738,8 @@ X(to_be_translated)
 			break;
 		}
 		if ((iword & 0x0e000090) == 0x00000090) {
-			int imm = ((iword >> 4) & 0xf0) | (iword & 0xf);
-			int regform = !(iword & 0x00400000);
+			regform = !(iword & 0x00400000);
+			imm = ((iword >> 4) & 0xf0) | (iword & 0xf);
 			p_bit = main_opcode & 1;
 			ic->arg[0] = (size_t)(&cpu->cd.arm.r[rn]);
 			ic->arg[2] = (size_t)(&cpu->cd.arm.r[rd]);
@@ -2911,25 +2921,26 @@ X(to_be_translated)
 			/*  NOTE/TODO: This assumes 4KB pages,
 			    it will not work with 1KB pages.  */
 			if (ofs >= 0 && ofs <= max && p != NULL) {
-				unsigned char c[4];
+				unsigned char cbuf[4];
 				int len = b_bit? 1 : 4;
 				uint32_t x, a = (addr & 0xfffff000) | ofs;
 				/*  ic->f = cond_instr(mov);  */
 				ic->f = arm_dpi_instr[condition_code + 16*0xd];
 				ic->arg[2] = (size_t)(&cpu->cd.arm.r[rd]);
 
-				memcpy(c, p + (a & 0xfff), len);
+				memcpy(cbuf, p + (a & 0xfff), len);
 
 				if (b_bit) {
-					x = c[0];
+					x = cbuf[0];
 				} else {
 					if (cpu->byte_order == EMUL_LITTLE_ENDIAN)
-						x = c[0] + (c[1]<<8) +
-						    (c[2]<<16) + (c[3]<<24);
+						x = cbuf[0] + (cbuf[1]<<8) +
+						    (cbuf[2]<<16) + (cbuf[3]<<24);
 					else
-						x = c[3] + (c[2]<<8) +
-						    (c[1]<<16) + (c[0]<<24);
+						x = cbuf[3] + (cbuf[2]<<8) +
+						    (cbuf[1]<<16) + (cbuf[0]<<24);
 				}
+				
 				ic->arg[1] = x;
 			}
 		}

@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2006-2009  Anders Gavare.  All rights reserved.
+ *  Copyright (C) 2006-2011  Anders Gavare.  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions are met:
@@ -31,6 +31,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sstream>
+#include <string>
 
 #include "cpu.h"
 #include "device.h"
@@ -38,6 +40,9 @@
 #include "machine.h"
 #include "memory.h"
 #include "misc.h"
+
+
+using namespace std;
 
 
 MACHINE_SETUP(dreamcast)
@@ -67,20 +72,32 @@ MACHINE_SETUP(dreamcast)
 	 *
 	 *  0x00000000 - 0x001fffff	Boot ROM (2 MB)
 	 *  0x00200000 - 0x003fffff	Flash (256 KB)
+	 *				The bytes read by the Dreamcast PROM during
+	 *				boot are:
+	 *				    Offset 0x1a000 .. 0x1a004 = 5 bytes
+	 *					hex digits (maybe limited to 0x30, 0x31, 0x32, or 0x33)
+	 *					0x1a000 could be the machine's region code
+	 *				    Offset 0x1a056 .. 0x1a05d = 8 bytes
+	 *					serial number / machine ID.
+	 *  0x005f0000 - ...            ???
 	 *  0x005f6800 - ...		PowerVR2 DMA registers
 	 *  0x005f6900 - ...		ASIC registers
 	 *  0x005f6c00 - ...		Maple registers (controller ports)
 	 *  0x005f7000 - ...		GDROM registers
-	 *  0x005f7400 - ...		???
+	 *  0x005f7400 - ...		(G2 External DMA registers? Or GDROM?)
 	 *  0x005f74e4 - ...		GDROM re-enable disabled drive (?)
 	 *  0x005f7800 - ...		G2 External DMA registers
-	 *  0x005f7c00 - ...		???
+	 *  0x005f7c00 - ...		DMA (?) for some device (PVR related?)
 	 *  0x005f8000 - 0x005f9fff	PVR registers (graphics)
+	 *  0x00600000 - ...		??? some device
 	 *  0x00600400 - 0x0060047f	LAN Adapter (MB86967) registers
+	 *  0x00606900 - ...		???
 	 *  0x00700000 - ...		SPU registers (sound)
+	 *  0x00702800 - 0x007028ff	???
 	 *  0x00702c00 -		Cable select and AICA (?) (*3)
+	 *  0x00703xxx - ...		AICA something
 	 *  0x00710000 - 0x00710007	RTC registers
-	 *  0x00800000 - 0x009fffff	Sound RAM (2 MB)
+	 *  0x00800000 - 0x009fffff	AICA (Sound) RAM (2 MB) (*4)
 	 *  0x01000000 - ...		Parallel port registers
 	 *  0x02000000 - ...		CD-ROM port registers
 	 *  0x04000000 - 0x047fffff	Video RAM (*)     (64-bit)
@@ -94,9 +111,20 @@ MACHINE_SETUP(dreamcast)
 	 *
 	 *  (*) = with banks 0 and 1 switched; 64-bit read/write access...
 	 *  (*3) = See VOUTC in Linux' drivers/video/pvr2fb.c.
+	 *  (*4) = It seems that ARM machine code is placed here.
 	 */
 
+	dev_ram_init(machine, 0x00000000, 2 * 1024 * 1024,
+	    DEV_RAM_RAM /* | DEV_RAM_TRACE_ALL_ACCESSES */, 0x0, "bootrom");
+
+	dev_ram_init(machine, 0x00200000, 256 * 1024,
+	    DEV_RAM_RAM /* | DEV_RAM_TRACE_ALL_ACCESSES */, 0x0, "flash");
+
+	dev_ram_init(machine, 0x00600004, 4, DEV_RAM_RAM, 0);
+	dev_ram_init(machine, 0x00700000, 0x27ff, DEV_RAM_RAM, 0);
+	dev_ram_init(machine, 0x00702800, 256, DEV_RAM_RAM, 0);
 	dev_ram_init(machine, 0x00702c00, 4, DEV_RAM_RAM, 0);
+	dev_ram_init(machine, 0x00703000, 0x1fff, DEV_RAM_RAM, 0);
 
 	/*  Sound RAM:  */
 	dev_ram_init(machine, 0x00800000, 2 * 1048576, DEV_RAM_RAM, 0);
@@ -121,6 +149,34 @@ MACHINE_SETUP(dreamcast)
 	device_add(machine, "dreamcast_maple");
 	device_add(machine, "dreamcast_rtc");
 
+	// Add devices as symbols, so that they show up in disassembly/runtime.
+	struct memory *mem = cpu->mem;
+	for (int i = 0; i < mem->n_mmapped_devices; i++) {
+		// Add everything which is not called "ram" (for now).
+		if (strcmp(mem->devices[i].name, "ram") == 0) {
+			continue;
+		}
+		
+		stringstream ss;
+		ss.flags(ios::hex);
+		ss << "(" << mem->devices[i].name << "@0x" << mem->devices[i].baseaddr << ")";
+		string name = ss.str();		
+
+		add_symbol_name(
+		    &machine->symbol_context,
+		    mem->devices[i].baseaddr | 0x80000000U,
+		    mem->devices[i].length,
+		    name.c_str(),
+		    0, 0);
+
+		add_symbol_name(
+		    &machine->symbol_context,
+		    mem->devices[i].baseaddr | 0xa0000000U,
+		    mem->devices[i].length,
+		    name.c_str(),
+		    0, 0);
+	}
+
 	if (!machine->prom_emulation)
 		return;
 
@@ -130,15 +186,15 @@ MACHINE_SETUP(dreamcast)
 
 MACHINE_DEFAULT_CPU(dreamcast)
 {
-	/*  Hitachi SH4, 200 MHz  */
+	// Hitachi SH4, 200 MHz.  (Or probably an "SH4a".)
 	machine->cpu_name = strdup("SH7750");
 }
 
 
 MACHINE_DEFAULT_RAM(dreamcast)
 {
-	/*  Note: This is the size of the boot ROM area, since the
-	    Dreamcast's RAM isn't located at physical address zero.  */
+	// Note: This is the size of the boot ROM area, since the
+	// Dreamcast's RAM isn't located at physical address zero.
 	machine->physical_ram_in_mb = 2;
 }
 

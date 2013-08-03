@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2005-2009  Anders Gavare.  All rights reserved.
+ *  Copyright (C) 2005-2010  Anders Gavare.  All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that the following conditions are met:
@@ -389,9 +389,12 @@ int DYNTRANS_RUN_INSTR_DEF(struct cpu *cpu)
 #ifdef DYNTRANS_MIPS
 	/*  Update the count register (on everything except EXC3K):  */
 	if (cpu->cd.mips.cpu_type.exc_model != EXC3K) {
-		uint32_t old = cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
-		int32_t diff1 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] - old;
-		int32_t diff2;
+		uint32_t old;
+		int32_t diff1, diff2;
+		cpu->cd.mips.coproc[0]->reg[COP0_COUNT] -= cpu->cd.mips.count_register_read_count;
+		cpu->cd.mips.count_register_read_count = 0;
+		old = cpu->cd.mips.coproc[0]->reg[COP0_COUNT];
+		diff1 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] - old;
 		cpu->cd.mips.coproc[0]->reg[COP0_COUNT] =
 		    (int32_t) (old + n_instrs);
 		diff2 = cpu->cd.mips.coproc[0]->reg[COP0_COMPARE] -
@@ -453,10 +456,14 @@ void DYNTRANS_FUNCTION_TRACE_DEF(struct cpu *cpu, int n_args)
 	char *symbol;
 	uint64_t ot;
 	int x, print_dots = 1, n_args_to_print =
+#if defined(DYNTRANS_ALPHA)
+	    6
+#else
 #if defined(DYNTRANS_SH) || defined(DYNTRANS_M88K)
 	    8	/*  Both for 32-bit and 64-bit SuperH, and M88K  */
 #else
 	    4	/*  Default value for most archs  */
+#endif
 #endif
 	    ;
 
@@ -485,6 +492,9 @@ void DYNTRANS_FUNCTION_TRACE_DEF(struct cpu *cpu, int n_args)
 	 */
 	for (x=0; x<n_args_to_print; x++) {
 		int64_t d = cpu->cd.DYNTRANS_ARCH.
+#ifdef DYNTRANS_ALPHA
+		    r[ALPHA_A0
+#endif
 #ifdef DYNTRANS_ARM
 		    r[0
 #endif
@@ -1273,6 +1283,8 @@ void DYNTRANS_INVALIDATE_TC_CODE(struct cpu *cpu, uint64_t addr, int flags)
 				*physpage_entryp = ppp->next_ofs;
 		}
 #else
+		prev_ppp = prev_ppp;	// shut up compiler warning
+
 		/*
 		 *  Instead of removing the page from the code cache, each
 		 *  entry can be set to "to_be_translated". This is slow in
@@ -1410,6 +1422,8 @@ void DYNTRANS_UPDATE_TRANSLATION_TABLE(struct cpu *cpu, uint64_t vaddr_page,
 		writeflag &= ~MEMORY_USER_ACCESS;
 		useraccess = 1;
 	}
+
+	useraccess = useraccess;  // shut up compiler warning about unused var
 
 #ifdef DYNTRANS_M88K
 	/*  TODO  */
@@ -1660,10 +1674,10 @@ cpu->cd.DYNTRANS_ARCH.vph_tlb_entry[r].valid);
 			if (curpc == (MODE_uint_t)
 			    cpu->machine->breakpoints.addr[i]) {
 				if (!cpu->machine->instruction_trace) {
-					int old_quiet_mode = quiet_mode;
+					int tmp_old_quiet_mode = quiet_mode;
 					quiet_mode = 0;
 					DISASSEMBLE(cpu, ib, 1, 0);
-					quiet_mode = old_quiet_mode;
+					quiet_mode = tmp_old_quiet_mode;
 				}
 #ifdef MODE32
 				fatal("BREAKPOINT: pc = 0x%"PRIx32"\n(The "
